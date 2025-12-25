@@ -41,6 +41,7 @@ mod log;
 use std::env;
 use std::num::{NonZero, NonZeroI32};
 use std::ops::Range;
+use std::process::ExitCode;
 use std::rc::Rc;
 use std::str::FromStr;
 use std::sync::Once;
@@ -397,16 +398,14 @@ use fatal_error;
 fn run_compiler_and_exit(
     args: &[String],
     callbacks: &mut (dyn rustc_driver::Callbacks + Send),
-) -> ! {
+) -> ExitCode {
     // Install the ctrlc handler that sets `rustc_const_eval::CTRL_C_RECEIVED`, even if
     // MIRI_BE_RUSTC is set. We do this late so that when `native_lib::init_sv` is called,
     // there are no other threads.
     rustc_driver::install_ctrlc_handler();
 
     // Invoke compiler, catch any unwinding panics and handle return code.
-    let exit_code =
-        rustc_driver::catch_with_exit_code(move || rustc_driver::run_compiler(args, callbacks));
-    exit(exit_code)
+    rustc_driver::catch_with_exit_code(move || rustc_driver::run_compiler(args, callbacks))
 }
 
 /// Parses a comma separated list of `T` from the given string:
@@ -436,7 +435,7 @@ fn parse_range(val: &str) -> Result<Range<u32>, &'static str> {
     Ok(from..to)
 }
 
-fn main() {
+fn main() -> ExitCode {
     let early_dcx = EarlyDiagCtxt::new(ErrorOutputType::default());
 
     // Snapshot a copy of the environment before `rustc` starts messing with it.
@@ -451,9 +450,7 @@ fn main() {
         if crate_kind == "host" {
             // For host crates like proc macros and build scripts, we are an entirely normal rustc.
             // These eventually produce actual binaries and never run in Miri.
-            match rustc_driver::main() {
-                // Empty match proves this function will never return.
-            }
+            return rustc_driver::main();
         } else if crate_kind != "target" {
             panic!("invalid `MIRI_BE_RUSTC` value: {crate_kind:?}")
         };
@@ -469,7 +466,7 @@ fn main() {
         args.splice(1..1, miri::MIRI_DEFAULT_ARGS.iter().map(ToString::to_string));
 
         // We cannot use `rustc_driver::main` as we want it to use `args` as the CLI arguments.
-        run_compiler_and_exit(&args, &mut MiriDepCompilerCalls)
+        return run_compiler_and_exit(&args, &mut MiriDepCompilerCalls);
     }
 
     // Add an ICE bug report hook.
@@ -517,10 +514,9 @@ fn main() {
                 Some(BorrowTrackerMethod::TreeBorrows(params)) => {
                     params.precise_interior_mut = false;
                 }
-                _ =>
-                    fatal_error!(
-                        "`-Zmiri-tree-borrows` is required before `-Zmiri-tree-borrows-no-precise-interior-mut`"
-                    ),
+                _ => fatal_error!(
+                    "`-Zmiri-tree-borrows` is required before `-Zmiri-tree-borrows-no-precise-interior-mut`"
+                ),
             };
         } else if arg == "-Zmiri-disable-data-race-detector" {
             miri_config.data_race_detector = false;
@@ -542,12 +538,12 @@ fn main() {
                 "abort" => miri::IsolatedOp::Reject(miri::RejectOpWith::Abort),
                 "hide" => miri::IsolatedOp::Reject(miri::RejectOpWith::NoWarning),
                 "warn" => miri::IsolatedOp::Reject(miri::RejectOpWith::Warning),
-                "warn-nobacktrace" =>
-                    miri::IsolatedOp::Reject(miri::RejectOpWith::WarningWithoutBacktrace),
-                _ =>
-                    fatal_error!(
-                        "-Zmiri-isolation-error must be `abort`, `hide`, `warn`, or `warn-nobacktrace`"
-                    ),
+                "warn-nobacktrace" => {
+                    miri::IsolatedOp::Reject(miri::RejectOpWith::WarningWithoutBacktrace)
+                }
+                _ => fatal_error!(
+                    "-Zmiri-isolation-error must be `abort`, `hide`, `warn`, or `warn-nobacktrace`"
+                ),
             };
         } else if arg == "-Zmiri-ignore-leaks" {
             miri_config.ignore_leaks = true;
